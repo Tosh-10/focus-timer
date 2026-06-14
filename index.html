@@ -26,6 +26,8 @@
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; }
+  html { background: #0f172a; }            /* fills iOS overscroll/bounce area so no white shows */
+  body { overscroll-behavior: none; }
   body {
     background: var(--bg);
     color: var(--text);
@@ -329,6 +331,8 @@
     if (audioCtx) return;
     var AC = window.AudioContext || window.webkitAudioContext;
     audioCtx = new AC();
+    // iOS: play through the media/playback channel so the silent (mute) switch doesn't kill the noise.
+    try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
 
     // 2s of white noise, looped
     var bufLen = audioCtx.sampleRate * 2;
