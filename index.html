@@ -670,8 +670,16 @@
 })();
 
 // Register the service worker so the app installs and runs fully offline (HTTPS only).
+// Auto-reloads once when a new version takes over, so updates apply without a manual reinstall.
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", function () {
+    var hadController = !!navigator.serviceWorker.controller;
+    var refreshing = false;
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (!hadController || refreshing) return; // skip the harmless first-install activation
+      refreshing = true;
+      window.location.reload();
+    });
     navigator.serviceWorker.register("service-worker.js").catch(function () {});
   });
 }
