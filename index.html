@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Focus">
+<meta name="theme-color" content="#0f172a">
+<title>Focus Timer</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #0f172a;
+    --bg-2: #1e293b;
+    --work: #ef4444;
+    --work-glow: rgba(239, 68, 68, 0.35);
+    --rest: #22c55e;
+    --rest-glow: rgba(34, 197, 94, 0.35);
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --track: #334155;
+    --accent: #38bdf8;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100%;
+    min-height: 100dvh;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    transition: background 0.6s ease;
+    overflow-x: hidden;
+  }
+  body.work  { background: radial-gradient(120% 120% at 50% 0%, #2a1416 0%, var(--bg) 55%); }
+  body.rest  { background: radial-gradient(120% 120% at 50% 0%, #0f2a1a 0%, var(--bg) 55%); }
+
+  main {
+    width: 100%;
+    max-width: 460px;
+    padding: 24px 20px 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 22px;
+  }
+
+  .phase-label {
+    font-size: 14px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--muted);
+    transition: color 0.4s ease;
+  }
+  body.work .phase-label { color: var(--work); }
+  body.rest .phase-label { color: var(--rest); }
+
+  /* Timer ring */
+  .ring-wrap { position: relative; width: 280px; height: 280px; max-width: 80vw; max-height: 80vw; }
+  .ring-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring-bg { fill: none; stroke: var(--track); stroke-width: 10; }
+  .ring-fg {
+    fill: none;
+    stroke-width: 10;
+    stroke-linecap: round;
+    transition: stroke 0.4s ease;
+  }
+  body.work .ring-fg { stroke: var(--work); filter: drop-shadow(0 0 8px var(--work-glow)); }
+  body.rest .ring-fg { stroke: var(--rest); filter: drop-shadow(0 0 8px var(--rest-glow)); }
+
+  .ring-center {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px;
+  }
+  .time { font-size: 58px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+  .session-count { font-size: 13px; color: var(--muted); }
+
+  /* Controls */
+  .controls { display: flex; align-items: center; gap: 16px; }
+  button {
+    font-family: inherit;
+    color: var(--text);
+    border: none;
+    cursor: pointer;
+    transition: transform 0.1s ease, background 0.2s ease, opacity 0.2s ease;
+  }
+  button:active { transform: scale(0.92); }
+  .btn-round {
+    background: var(--bg-2);
+    border: 1px solid var(--track);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .btn-secondary { width: 56px; height: 56px; }
+  .btn-secondary svg { width: 22px; height: 22px; }
+  .btn-primary {
+    width: 84px; height: 84px;
+    background: var(--accent);
+    color: #04212e;
+    box-shadow: 0 6px 20px rgba(56, 189, 248, 0.3);
+  }
+  .btn-primary svg { width: 34px; height: 34px; }
+  .icon { stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-fill { fill: currentColor; stroke: none; }
+
+  .hint { font-size: 12px; color: var(--muted); text-align: center; min-height: 16px; }
+
+  /* Settings panel */
+  .settings {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--track);
+    border-radius: 18px;
+    overflow: hidden;
+  }
+  .settings summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 16px 20px;
+    font-weight: 600;
+    font-size: 15px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .settings summary::-webkit-details-marker { display: none; }
+  .settings summary .chev { transition: transform 0.2s ease; color: var(--muted); }
+  .settings[open] summary .chev { transform: rotate(180deg); }
+  .settings-body { padding: 4px 20px 22px; display: flex; flex-direction: column; gap: 20px; }
+
+  .field { display: flex; flex-direction: column; gap: 8px; }
+  .field-row { display: flex; align-items: center; justify-content: space-between; }
+  .field label { font-size: 14px; color: var(--text); font-weight: 500; }
+  .field .val { font-size: 13px; color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 6px; border-radius: 3px;
+    background: var(--track); outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 22px; height: 22px; border-radius: 50%; border: none;
+    background: var(--accent); cursor: pointer;
+  }
+
+  .num-field { display: flex; flex-direction: column; gap: 8px; }
+  .stepper { display: flex; align-items: center; gap: 12px; }
+  .stepper button {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: var(--track); color: var(--text);
+    font-size: 22px; font-weight: 600; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .stepper .num { flex: 1; text-align: center; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .durations { display: flex; gap: 16px; }
+  .durations .num-field { flex: 1; }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .chip {
+    background: var(--track); color: var(--text);
+    border: 1px solid transparent;
+    border-radius: 999px; padding: 7px 12px;
+    font-size: 12px; font-weight: 500;
+  }
+  .chip.active { background: rgba(56,189,248,0.15); border-color: var(--accent); color: var(--accent); }
+
+  .sound-toggle { display: flex; align-items: center; gap: 10px; }
+  .switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider-sw {
+    position: absolute; inset: 0; background: var(--track);
+    border-radius: 999px; transition: background 0.2s ease;
+  }
+  .slider-sw::before {
+    content: ""; position: absolute; height: 20px; width: 20px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: transform 0.2s ease;
+  }
+  .switch input:checked + .slider-sw { background: var(--accent); }
+  .switch input:checked + .slider-sw::before { transform: translateX(20px); }
+
+  footer { font-size: 11px; color: var(--muted); text-align: center; padding-bottom: 8px; }
+</style>
+</head>
+<body class="work">
+<main>
+  <div class="phase-label" id="phaseLabel">Focus</div>
+
+  <div class="ring-wrap">
+    <svg viewBox="0 0 200 200">
+      <circle class="ring-bg" cx="100" cy="100" r="92"></circle>
+      <circle class="ring-fg" id="ringFg" cx="100" cy="100" r="92"></circle>
+    </svg>
+    <div class="ring-center">
+      <div class="time" id="timeDisplay">25:00</div>
+      <div class="session-count" id="sessionCount">Session 1</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="btn-round btn-secondary" id="backBtn" title="Restart step (or previous step within 5s)" aria-label="Go back">
+      <!-- skip back (mirror of skip forward) -->
+      <svg class="icon-fill" viewBox="0 0 24 24"><path d="M19 5v14l-9-7z"/><rect x="5" y="5" width="3" height="14" rx="1"/></svg>
+    </button>
+    <button class="btn-round btn-primary" id="playBtn" title="Start / Pause" aria-label="Start or pause">
+      <svg class="icon-fill" id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    </button>
+    <button class="btn-round btn-secondary" id="skipBtn" title="Skip to next step" aria-label="Skip to next step">
+      <!-- skip forward -->
+      <svg class="icon-fill" viewBox="0 0 24 24"><path d="M5 5v14l9-7z"/><rect x="16" y="5" width="3" height="14" rx="1"/></svg>
+    </button>
+  </div>
+
+  <div class="hint" id="hint">Press play to begin · white noise plays during focus</div>
+
+  <details class="settings" id="settings">
+    <summary>
+      <span>Settings</span>
+      <span class="chev">▾</span>
+    </summary>
+    <div class="settings-body">
+      <div class="durations">
+        <div class="num-field">
+          <label>Focus (min)</label>
+          <div class="stepper">
+            <button data-act="dec" data-target="work">−</button>
+            <span class="num" id="workNum">25</span>
+            <button data-act="inc" data-target="work">+</button>
+          </div>
+        </div>
+        <div class="num-field">
+          <label>Rest (min)</label>
+          <div class="stepper">
+            <button data-act="dec" data-target="rest">−</button>
+            <span class="num" id="restNum">5</span>
+            <button data-act="inc" data-target="rest">+</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sound-toggle">
+        <label class="switch">
+          <input type="checkbox" id="soundOn" checked>
+          <span class="slider-sw"></span>
+        </label>
+        <label for="soundOn">White noise during focus</label>
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="volume">Volume</label>
+          <span class="val" id="volumeVal">50%</span>
+        </div>
+        <input type="range" id="volume" min="0" max="100" value="50">
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="tone">Tone (deep ↔ bright)</label>
+          <span class="val" id="toneVal">2000 Hz</span>
+        </div>
+        <input type="range" id="tone" min="100" max="12000" value="2000" step="100">
+        <span style="font-size:11px;color:var(--muted)">Low = soft rumble · High = bright hiss</span>
+        <div class="presets" id="presets">
+          <button class="chip" data-tone="180">Brown · deep focus</button>
+          <button class="chip" data-tone="600">Rain · calm</button>
+          <button class="chip" data-tone="1200">Pink · balanced</button>
+          <button class="chip" data-tone="4000">White · alert</button>
+          <button class="chip" data-tone="9000">Bright · masking</button>
+        </div>
+      </div>
+
+      <button class="btn-round" id="previewBtn" style="border-radius:12px;height:44px;background:var(--track);font-weight:600;font-size:14px">
+        Preview noise
+      </button>
+    </div>
+  </details>
+
+  <footer>Add to Home Screen for a full-screen app · settings save automatically</footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- State ----------
+  var defaults = { work: 25, rest: 5, volume: 50, tone: 2000, soundOn: true };
+  var settings = load();
+
+  var phase = "work";          // "work" | "rest"
+  var running = false;
+  var remaining = settings.work * 60; // seconds
+  var sessionNum = 1;
+  var tickHandle = null;
+  var endTime = 0;             // absolute timestamp the phase ends
+  var wakeLock = null;
+  var previewing = false;
+
+  // ---------- DOM ----------
+  var $ = function (id) { return document.getElementById(id); };
+  var timeDisplay = $("timeDisplay");
+  var sessionCount = $("sessionCount");
+  var phaseLabel = $("phaseLabel");
+  var ringFg = $("ringFg");
+  var playBtn = $("playBtn");
+  var playIcon = $("playIcon");
+  var hint = $("hint");
+
+  var R = 92;
+  var CIRC = 2 * Math.PI * R;
+  ringFg.style.strokeDasharray = CIRC;
+
+  // ---------- Audio (Web Audio API white noise) ----------
+  var audioCtx = null, noiseSrc = null, filterNode = null, gainNode = null;
+
+  function ensureAudio() {
+    if (audioCtx) return;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC();
+
+    // 2s of white noise, looped
+    var bufLen = audioCtx.sampleRate * 2;
+    var buffer = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+    var data = buffer.getChannelData(0);
+    for (var i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    noiseSrc = audioCtx.createBufferSource();
+    noiseSrc.buffer = buffer;
+    noiseSrc.loop = true;
+
+    filterNode = audioCtx.createBiquadFilter();
+    filterNode.type = "lowpass";
+    filterNode.frequency.value = settings.tone;
+    filterNode.Q.value = 0.7;
+
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = 0;
+
+    noiseSrc.connect(filterNode);
+    filterNode.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    noiseSrc.start(0);
+  }
+
+  function targetGain() {
+    // perceptual-ish curve, capped so it never blasts
+    var v = settings.volume / 100;
+    return v * v * 0.6;
+  }
+
+  function rampGain(to) {
+    if (!gainNode || !audioCtx) return;
+    var now = audioCtx.currentTime;
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+    gainNode.gain.linearRampToValueAtTime(to, now + 0.4);
+  }
+
+  function startNoise() {
+    if (!settings.soundOn) return;
+    ensureAudio();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    filterNode.frequency.value = settings.tone;
+    rampGain(targetGain());
+  }
+
+  function stopNoise() {
+    rampGain(0);
+  }
+
+  // ---------- Rendering ----------
+  function fmt(sec) {
+    sec = Math.max(0, Math.round(sec));
+    var m = Math.floor(sec / 60);
+    var s = sec % 60;
+    return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
+  function totalForPhase() {
+    return (phase === "work" ? settings.work : settings.rest) * 60;
+  }
+
+  function render() {
+    timeDisplay.textContent = fmt(remaining);
+    var total = totalForPhase();
+    var frac = total > 0 ? remaining / total : 0;
+    ringFg.style.strokeDashoffset = CIRC * (1 - frac);
+
+    document.body.className = phase;
+    phaseLabel.textContent = phase === "work" ? "Focus" : "Rest";
+    sessionCount.textContent = "Session " + sessionNum;
+    document.title = fmt(remaining) + " · " + (phase === "work" ? "Focus" : "Rest");
+    playIcon.innerHTML = running
+      ? '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>'   // pause
+      : '<path d="M8 5v14l11-7z"/>';               // play
+  }
+
+  // ---------- Timer loop ----------
+  function tick() {
+    remaining = (endTime - Date.now()) / 1000;
+    if (remaining <= 0) {
+      remaining = 0;
+      render();
+      chime(phase === "work" ? "rest" : "work");
+      nextPhase(true);
+      return;
+    }
+    render();
+  }
+
+  function startLoop() {
+    endTime = Date.now() + remaining * 1000;
+    clearInterval(tickHandle);
+    tickHandle = setInterval(tick, 250);
+  }
+
+  function start() {
+    if (running) return;
+    running = true;
+    startLoop();
+    if (phase === "work") startNoise();
+    requestWake();
+    setHint("");
+    render();
+  }
+
+  function pause() {
+    if (!running) return;
+    running = false;
+    clearInterval(tickHandle);
+    stopNoise();
+    releaseWake();
+    render();
+  }
+
+  function toggle() {
+    if (previewing) stopPreview();
+    running ? pause() : start();
+  }
+
+  function nextPhase(auto) {
+    if (phase === "work") {
+      phase = "rest";
+      stopNoise();
+    } else {
+      phase = "work";
+      sessionNum++;
+    }
+    remaining = totalForPhase();
+    if (running) {
+      startLoop();
+      if (phase === "work") startNoise(); else stopNoise();
+    }
+    if (auto) setHint(phase === "work" ? "Back to focus" : "Time to rest");
+    render();
+  }
+
+  function restartStep() {
+    remaining = totalForPhase();
+    if (running) {
+      startLoop();
+      if (phase === "work") startNoise();
+    }
+    setHint("Step restarted");
+    render();
+  }
+
+  function prevPhase() {
+    if (phase === "rest") {
+      phase = "work";
+      stopNoise();
+    } else { // currently work
+      if (sessionNum > 1) { phase = "rest"; sessionNum--; }
+      else { restartStep(); return; } // already at the very first step
+    }
+    remaining = totalForPhase();
+    if (running) {
+      startLoop();
+      if (phase === "work") startNoise(); else stopNoise();
+    }
+    setHint("Previous step");
+    render();
+  }
+
+  // Spotify-style: tap within 5s of the step starting -> previous step; otherwise restart current step
+  function backAction() {
+    if (previewing) stopPreview();
+    var elapsed = totalForPhase() - remaining;
+    if (elapsed <= 5) prevPhase();
+    else restartStep();
+  }
+
+  // gentle end-of-phase ding using the same audio context.
+  // entering "rest" -> soft two-note descending ding; entering "work" -> brighter ascending ding.
+  function chime(entering) {
+    try {
+      ensureAudio();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      var notes = entering === "rest" ? [880, 660] : [523.25, 783.99];
+      notes.forEach(function (freq, i) {
+        var o = audioCtx.createOscillator();
+        var g = audioCtx.createGain();
+        o.type = "sine";
+        o.frequency.value = freq;
+        o.connect(g); g.connect(audioCtx.destination);
+        var t = audioCtx.currentTime + i * 0.18;
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.35, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+        o.start(t); o.stop(t + 0.6);
+      });
+    } catch (e) {}
+    if (navigator.vibrate) navigator.vibrate(entering === "rest" ? [120, 60, 120] : 200);
+  }
+
+  // ---------- Wake lock (keep screen on while running) ----------
+  function requestWake() {
+    if (!("wakeLock" in navigator)) return;
+    navigator.wakeLock.request("screen").then(function (w) { wakeLock = w; }).catch(function () {});
+  }
+  function releaseWake() {
+    if (wakeLock) { wakeLock.release().catch(function(){}); wakeLock = null; }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") {
+      if (running) { tick(); requestWake(); }
+    }
+  });
+
+  // ---------- Preview ----------
+  function startPreview() {
+    previewing = true;
+    startNoise();
+    $("previewBtn").textContent = "Stop preview";
+  }
+  function stopPreview() {
+    previewing = false;
+    if (!running || phase !== "work") stopNoise();
+    $("previewBtn").textContent = "Preview noise";
+  }
+
+  // ---------- Settings UI ----------
+  function setHint(t) {
+    hint.textContent = t || (running ? "" : "Press play to begin · white noise plays during focus");
+  }
+
+  function syncSettingsUI() {
+    $("workNum").textContent = settings.work;
+    $("restNum").textContent = settings.rest;
+    $("volume").value = settings.volume;
+    $("volumeVal").textContent = settings.volume + "%";
+    $("tone").value = settings.tone;
+    $("toneVal").textContent = settings.tone + " Hz";
+    $("soundOn").checked = settings.soundOn;
+  }
+
+  function save() {
+    try { localStorage.setItem("focusTimer", JSON.stringify(settings)); } catch (e) {}
+  }
+  function load() {
+    try {
+      var s = JSON.parse(localStorage.getItem("focusTimer"));
+      if (s && typeof s === "object") {
+        return {
+          work: clamp(s.work, 1, 120, defaults.work),
+          rest: clamp(s.rest, 1, 60, defaults.rest),
+          volume: clamp(s.volume, 0, 100, defaults.volume),
+          tone: clamp(s.tone, 100, 12000, defaults.tone),
+          soundOn: s.soundOn !== false
+        };
+      }
+    } catch (e) {}
+    return Object.assign({}, defaults);
+  }
+  function clamp(v, lo, hi, dflt) {
+    v = Number(v);
+    if (isNaN(v)) return dflt;
+    return Math.min(hi, Math.max(lo, v));
+  }
+
+  // ---------- Wire up ----------
+  playBtn.addEventListener("click", toggle);
+  $("skipBtn").addEventListener("click", function () { if (previewing) stopPreview(); nextPhase(false); setHint("Skipped ahead"); });
+  $("backBtn").addEventListener("click", backAction);
+
+  document.querySelectorAll("#presets .chip").forEach(function (c) {
+    c.addEventListener("click", function () {
+      settings.tone = Number(c.dataset.tone);
+      $("tone").value = settings.tone;
+      $("toneVal").textContent = settings.tone + " Hz";
+      if (filterNode) filterNode.frequency.value = settings.tone;
+      markActivePreset();
+      save();
+    });
+  });
+
+  function markActivePreset() {
+    document.querySelectorAll("#presets .chip").forEach(function (c) {
+      c.classList.toggle("active", Number(c.dataset.tone) === settings.tone);
+    });
+  }
+
+  document.querySelectorAll(".stepper button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var target = b.dataset.target;
+      var act = b.dataset.act;
+      var step = act === "inc" ? 1 : -1;
+      settings[target] = clamp(settings[target] + step, 1, target === "work" ? 120 : 60, settings[target]);
+      // if the changed phase is the current one and timer isn't running, reset display
+      if (!running && phase === target) remaining = totalForPhase();
+      else if (!running) remaining = totalForPhase(); // keep display in sync when idle
+      syncSettingsUI();
+      save();
+      render();
+    });
+  });
+
+  $("volume").addEventListener("input", function () {
+    settings.volume = Number(this.value);
+    $("volumeVal").textContent = settings.volume + "%";
+    if ((running && phase === "work") || previewing) rampGain(targetGain());
+    save();
+  });
+
+  $("tone").addEventListener("input", function () {
+    settings.tone = Number(this.value);
+    $("toneVal").textContent = settings.tone + " Hz";
+    if (filterNode) filterNode.frequency.value = settings.tone;
+    markActivePreset();
+    save();
+  });
+
+  $("soundOn").addEventListener("change", function () {
+    settings.soundOn = this.checked;
+    if (!settings.soundOn) stopNoise();
+    else if (running && phase === "work") startNoise();
+    save();
+  });
+
+  $("previewBtn").addEventListener("click", function () {
+    previewing ? stopPreview() : startPreview();
+  });
+
+  // spacebar = play/pause on desktop
+  document.addEventListener("keydown", function (e) {
+    if (e.code === "Space" && e.target.tagName !== "INPUT") { e.preventDefault(); toggle(); }
+  });
+
+  // ---------- Init ----------
+  syncSettingsUI();
+  markActivePreset();
+  remaining = totalForPhase();
+  render();
+})();
+
+// Register the service worker so the app installs and runs fully offline (HTTPS only).
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("service-worker.js").catch(function () {});
+  });
+}
+</script>
+</body>
+</html>
