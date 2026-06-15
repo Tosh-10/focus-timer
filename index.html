@@ -325,7 +325,7 @@
   ringFg.style.strokeDasharray = CIRC;
 
   // ---------- Audio (Web Audio API white noise) ----------
-  var audioCtx = null, noiseSrc = null, filterNode = null, gainNode = null;
+  var audioCtx = null, noiseSrc = null, filterNode = null, gainNode = null, noiseAlive = false;
 
   function ensureAudio() {
     if (audioCtx) return;
@@ -333,9 +333,18 @@
     audioCtx = new AC();
     // iOS: play through the media/playback channel so the silent (mute) switch doesn't kill the noise.
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
+    buildNoiseGraph();
+    // If the context gets suspended/interrupted (e.g. a phone call), bring it back when we still want sound.
+    audioCtx.onstatechange = function () {
+      if (audioCtx.state === "running" && wantNoise()) rampGain(targetGain());
+    };
+  }
 
-    // 2s of white noise, looped
-    var bufLen = audioCtx.sampleRate * 2;
+  // (Re)build the looping white-noise chain. A phone call can permanently stop the source node,
+  // so we keep a noiseAlive flag and rebuild on demand.
+  function buildNoiseGraph() {
+    if (!audioCtx) return;
+    var bufLen = audioCtx.sampleRate * 2; // 2s of white noise, looped
     var buffer = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
     var data = buffer.getChannelData(0);
     for (var i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
@@ -355,7 +364,14 @@
     noiseSrc.connect(filterNode);
     filterNode.connect(gainNode);
     gainNode.connect(audioCtx.destination);
+    noiseSrc.onended = function () { noiseAlive = false; };
     noiseSrc.start(0);
+    noiseAlive = true;
+  }
+
+  // Should noise be playing right now?
+  function wantNoise() {
+    return (running && phase === "work" && settings.soundOn) || previewing;
   }
 
   function targetGain() {
@@ -375,13 +391,20 @@
   function startNoise() {
     if (!settings.soundOn) return;
     ensureAudio();
-    if (audioCtx.state === "suspended") audioCtx.resume();
+    if (!noiseAlive) buildNoiseGraph();           // rebuild if a call killed the source
+    if (audioCtx.state !== "running") audioCtx.resume().catch(function () {});
     filterNode.frequency.value = settings.tone;
     rampGain(targetGain());
   }
 
   function stopNoise() {
     rampGain(0);
+  }
+
+  // Re-assert the correct audio state — used when returning to the app after an interruption.
+  function syncAudioToState() {
+    if (wantNoise()) startNoise();
+    else if (audioCtx) stopNoise();
   }
 
   // ---------- Rendering ----------
@@ -412,20 +435,39 @@
   }
 
   // ---------- Timer loop ----------
+  // endTime is the absolute time the current phase ends. tick() catches up across any phase
+  // boundaries that elapsed while the app was backgrounded (iOS freezes timers in the background).
   function tick() {
-    remaining = (endTime - Date.now()) / 1000;
-    if (remaining <= 0) {
-      remaining = 0;
-      render();
-      chime(phase === "work" ? "rest" : "work");
-      nextPhase(true);
-      return;
+    var now = Date.now();
+    if (running && now >= endTime) {
+      var transitioned = false;
+      var guard = 0;
+      while (now >= endTime && guard++ < 10000) {
+        advanceOneBoundary();
+        transitioned = true;
+      }
+      if (transitioned) {
+        chime(phase);                 // ding for the phase we landed in
+        syncAudioToState();
+        setHint(phase === "work" ? "Back to focus" : "Time to rest");
+      }
     }
+    if (running) remaining = Math.max(0, (endTime - now) / 1000);
     render();
   }
 
-  function startLoop() {
-    endTime = Date.now() + remaining * 1000;
+  // Move past one completed phase: flip work<->rest and push endTime forward by the new phase's length.
+  function advanceOneBoundary() {
+    if (phase === "work") {
+      phase = "rest";
+    } else {
+      phase = "work";
+      sessionNum++;
+    }
+    endTime += totalForPhase() * 1000;
+  }
+
+  function startInterval() {
     clearInterval(tickHandle);
     tickHandle = setInterval(tick, 250);
   }
@@ -433,8 +475,9 @@
   function start() {
     if (running) return;
     running = true;
-    startLoop();
-    if (phase === "work") startNoise();
+    endTime = Date.now() + remaining * 1000;
+    startInterval();
+    syncAudioToState();
     requestWake();
     setHint("");
     render();
@@ -442,6 +485,7 @@
 
   function pause() {
     if (!running) return;
+    remaining = Math.max(0, (endTime - Date.now()) / 1000); // freeze the remaining time
     running = false;
     clearInterval(tickHandle);
     stopNoise();
@@ -454,29 +498,26 @@
     running ? pause() : start();
   }
 
-  function nextPhase(auto) {
-    if (phase === "work") {
-      phase = "rest";
-      stopNoise();
-    } else {
-      phase = "work";
-      sessionNum++;
-    }
+  // Restart timing for whatever phase we're now in (full duration from now) and apply its audio.
+  function resetPhaseTiming() {
     remaining = totalForPhase();
     if (running) {
-      startLoop();
-      if (phase === "work") startNoise(); else stopNoise();
+      endTime = Date.now() + remaining * 1000;
+      startInterval();
     }
+    syncAudioToState();
+  }
+
+  function nextPhase(auto) {
+    if (phase === "work") phase = "rest";
+    else { phase = "work"; sessionNum++; }
+    resetPhaseTiming();
     if (auto) setHint(phase === "work" ? "Back to focus" : "Time to rest");
     render();
   }
 
   function restartStep() {
-    remaining = totalForPhase();
-    if (running) {
-      startLoop();
-      if (phase === "work") startNoise();
-    }
+    resetPhaseTiming();
     setHint("Step restarted");
     render();
   }
@@ -484,16 +525,11 @@
   function prevPhase() {
     if (phase === "rest") {
       phase = "work";
-      stopNoise();
     } else { // currently work
       if (sessionNum > 1) { phase = "rest"; sessionNum--; }
       else { restartStep(); return; } // already at the very first step
     }
-    remaining = totalForPhase();
-    if (running) {
-      startLoop();
-      if (phase === "work") startNoise(); else stopNoise();
-    }
+    resetPhaseTiming();
     setHint("Previous step");
     render();
   }
@@ -537,11 +573,17 @@
   function releaseWake() {
     if (wakeLock) { wakeLock.release().catch(function(){}); wakeLock = null; }
   }
+  // When we come back to the app (after a call, app switch, or screen unlock), catch the timer up
+  // and restart the noise — iOS suspends the audio context and JS timers in the background.
+  function onReturn() {
+    if (running) { tick(); requestWake(); }
+    syncAudioToState();
+  }
   document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "visible") {
-      if (running) { tick(); requestWake(); }
-    }
+    if (document.visibilityState === "visible") onReturn();
   });
+  window.addEventListener("focus", onReturn);
+  window.addEventListener("pageshow", onReturn);
 
   // ---------- Preview ----------
   function startPreview() {
