@@ -432,6 +432,50 @@
     playIcon.innerHTML = running
       ? '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>'   // pause
       : '<path d="M8 5v14l11-7z"/>';               // play
+    syncMedia();
+  }
+
+  // ---------- Lock-screen / Media Session ----------
+  // Gives iOS a proper title, icon and progress bar, and — by declaring playback "playing" for the
+  // whole running session (focus AND rest) — keeps the audio session alive through the silent rest
+  // so the next focus block isn't muted.
+  var lastMetaKey = "";
+  function syncMedia() {
+    if (!("mediaSession" in navigator)) return;
+    var key = phase + "|" + sessionNum;
+    if (key !== lastMetaKey) {
+      lastMetaKey = key;
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: phase === "work" ? "Focus" : "Rest",
+          artist: "Session " + sessionNum,
+          album: "Focus Timer",
+          artwork: [
+            { src: "icon-192.png", sizes: "192x192", type: "image/png" },
+            { src: "icon-512.png", sizes: "512x512", type: "image/png" }
+          ]
+        });
+      } catch (e) {}
+    }
+    try { navigator.mediaSession.playbackState = running ? "playing" : "paused"; } catch (e) {}
+    if (navigator.mediaSession.setPositionState) {
+      try {
+        var dur = totalForPhase();
+        var pos = Math.min(dur, Math.max(0, dur - remaining));
+        navigator.mediaSession.setPositionState({ duration: dur, playbackRate: 1, position: pos });
+      } catch (e) {}
+    }
+  }
+
+  function setupMediaHandlers() {
+    if (!("mediaSession" in navigator)) return;
+    var set = function (action, fn) {
+      try { navigator.mediaSession.setActionHandler(action, fn); } catch (e) {}
+    };
+    set("play", function () { if (!running) start(); });
+    set("pause", function () { if (running) pause(); });
+    set("nexttrack", function () { if (previewing) stopPreview(); nextPhase(false); setHint("Skipped ahead"); });
+    set("previoustrack", function () { backAction(); });
   }
 
   // ---------- Timer loop ----------
@@ -707,6 +751,7 @@
   // ---------- Init ----------
   syncSettingsUI();
   markActivePreset();
+  setupMediaHandlers();
   remaining = totalForPhase();
   render();
 })();
