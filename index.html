@@ -324,8 +324,26 @@
   var CIRC = 2 * Math.PI * R;
   ringFg.style.strokeDasharray = CIRC;
 
-  // ---------- Audio (Web Audio API white noise) ----------
-  var audioCtx = null, noiseSrc = null, filterNode = null, gainNode = null, noiseAlive = false;
+  // ---------- Audio ----------
+  // White noise is a looping <audio> element routed through a Web Audio lowpass (tone) + gain (volume).
+  // Anchoring playback to a real media element is what makes iOS lock-screen play/pause reliable and
+  // keeps the now-playing slot from jumping to another app. The element stays *playing* for the whole
+  // session (silent during rest via the gain node) so the focus->rest->focus transitions never need a
+  // user gesture to un-mute.
+  var audioCtx = null, mediaSrc = null, filterNode = null, gainNode = null, noiseEl = null, pausePending = null;
+
+  // Build an 8s white-noise WAV in memory and hand back a blob URL (no external file needed).
+  function makeNoiseURL() {
+    var sr = 44100, seconds = 8, n = sr * seconds, bytes = 44 + n * 2;
+    var ab = new ArrayBuffer(bytes), dv = new DataView(ab);
+    function ws(o, s) { for (var i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); }
+    ws(0, "RIFF"); dv.setUint32(4, bytes - 8, true); ws(8, "WAVE"); ws(12, "fmt ");
+    dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    ws(36, "data"); dv.setUint32(40, n * 2, true);
+    for (var i = 0, off = 44; i < n; i++, off += 2) dv.setInt16(off, (Math.random() * 2 - 1) * 0.9 * 32767, true);
+    return URL.createObjectURL(new Blob([ab], { type: "audio/wav" }));
+  }
 
   function ensureAudio() {
     if (audioCtx) return;
@@ -333,50 +351,31 @@
     audioCtx = new AC();
     // iOS: play through the media/playback channel so the silent (mute) switch doesn't kill the noise.
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
-    buildNoiseGraph();
-    // If the context gets suspended/interrupted (e.g. a phone call), bring it back when we still want sound.
-    audioCtx.onstatechange = function () {
-      if (audioCtx.state === "running" && wantNoise()) rampGain(targetGain());
-    };
-  }
 
-  // (Re)build the looping white-noise chain. A phone call can permanently stop the source node,
-  // so we keep a noiseAlive flag and rebuild on demand.
-  function buildNoiseGraph() {
-    if (!audioCtx) return;
-    var bufLen = audioCtx.sampleRate * 2; // 2s of white noise, looped
-    var buffer = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
-    var data = buffer.getChannelData(0);
-    for (var i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+    noiseEl = new Audio();
+    noiseEl.src = makeNoiseURL();
+    noiseEl.loop = true;
+    noiseEl.preload = "auto";
 
-    noiseSrc = audioCtx.createBufferSource();
-    noiseSrc.buffer = buffer;
-    noiseSrc.loop = true;
-
+    mediaSrc = audioCtx.createMediaElementSource(noiseEl);
     filterNode = audioCtx.createBiquadFilter();
     filterNode.type = "lowpass";
     filterNode.frequency.value = settings.tone;
     filterNode.Q.value = 0.7;
-
     gainNode = audioCtx.createGain();
     gainNode.gain.value = 0;
-
-    noiseSrc.connect(filterNode);
+    mediaSrc.connect(filterNode);
     filterNode.connect(gainNode);
     gainNode.connect(audioCtx.destination);
-    noiseSrc.onended = function () { noiseAlive = false; };
-    noiseSrc.start(0);
-    noiseAlive = true;
   }
 
-  // Should noise be playing right now?
+  // Audible right now? (focus block with sound on, or previewing.)
   function wantNoise() {
-    return (running && phase === "work" && settings.soundOn) || previewing;
+    return previewing || (running && phase === "work" && settings.soundOn);
   }
 
   function targetGain() {
-    // perceptual-ish curve, capped so it never blasts
-    var v = settings.volume / 100;
+    var v = settings.volume / 100;   // perceptual-ish curve, capped so it never blasts
     return v * v * 0.6;
   }
 
@@ -388,23 +387,25 @@
     gainNode.gain.linearRampToValueAtTime(to, now + 0.4);
   }
 
-  function startNoise() {
-    if (!settings.soundOn) return;
-    ensureAudio();
-    if (!noiseAlive) buildNoiseGraph();           // rebuild if a call killed the source
-    if (audioCtx.state !== "running") audioCtx.resume().catch(function () {});
-    filterNode.frequency.value = settings.tone;
-    rampGain(targetGain());
-  }
-
-  function stopNoise() {
-    rampGain(0);
-  }
-
-  // Re-assert the correct audio state — used when returning to the app after an interruption.
+  // The single source of truth for audio. Keeps the element playing across the whole running session
+  // (so the media session stays alive), and only the gain decides whether you actually hear it.
   function syncAudioToState() {
-    if (wantNoise()) startNoise();
-    else if (audioCtx) stopNoise();
+    var shouldPlay = previewing || (running && settings.soundOn);  // element playing (maybe silent)
+    if (shouldPlay) {
+      if (pausePending) { clearTimeout(pausePending); pausePending = null; }
+      ensureAudio();
+      if (audioCtx.state !== "running") audioCtx.resume().catch(function () {});
+      filterNode.frequency.value = settings.tone;
+      var p = noiseEl.play();
+      if (p && p.catch) p.catch(function () {});
+      rampGain(wantNoise() ? targetGain() : 0);
+    } else {
+      if (gainNode) rampGain(0);
+      if (noiseEl) {                 // fade out, then release the media element
+        if (pausePending) clearTimeout(pausePending);
+        pausePending = setTimeout(function () { try { noiseEl.pause(); } catch (e) {} pausePending = null; }, 450);
+      }
+    }
   }
 
   // ---------- Rendering ----------
@@ -532,7 +533,7 @@
     remaining = Math.max(0, (endTime - Date.now()) / 1000); // freeze the remaining time
     running = false;
     clearInterval(tickHandle);
-    stopNoise();
+    syncAudioToState();
     releaseWake();
     render();
   }
@@ -632,12 +633,12 @@
   // ---------- Preview ----------
   function startPreview() {
     previewing = true;
-    startNoise();
+    syncAudioToState();
     $("previewBtn").textContent = "Stop preview";
   }
   function stopPreview() {
     previewing = false;
-    if (!running || phase !== "work") stopNoise();
+    syncAudioToState();
     $("previewBtn").textContent = "Preview noise";
   }
 
@@ -720,7 +721,7 @@
   $("volume").addEventListener("input", function () {
     settings.volume = Number(this.value);
     $("volumeVal").textContent = settings.volume + "%";
-    if ((running && phase === "work") || previewing) rampGain(targetGain());
+    if (wantNoise()) rampGain(targetGain());
     save();
   });
 
@@ -734,8 +735,7 @@
 
   $("soundOn").addEventListener("change", function () {
     settings.soundOn = this.checked;
-    if (!settings.soundOn) stopNoise();
-    else if (running && phase === "work") startNoise();
+    syncAudioToState();
     save();
   });
 
