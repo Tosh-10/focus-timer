@@ -325,16 +325,18 @@
   ringFg.style.strokeDasharray = CIRC;
 
   // ---------- Audio ----------
-  // White noise is a looping <audio> element routed through a Web Audio lowpass (tone) + gain (volume).
-  // Anchoring playback to a real media element is what makes iOS lock-screen play/pause reliable and
-  // keeps the now-playing slot from jumping to another app. The element stays *playing* for the whole
-  // session (silent during rest via the gain node) so the focus->rest->focus transitions never need a
-  // user gesture to un-mute.
-  var audioCtx = null, mediaSrc = null, filterNode = null, gainNode = null, noiseEl = null, pausePending = null;
+  // Two cooperating pieces:
+  //  1. A looping Web Audio buffer source = the *audible* white noise. Its loop is sample-accurate,
+  //     so there's no gap/click every few seconds (an <audio loop> element is not gapless).
+  //  2. A looping <audio> element ("anchor") whose output we silence in the graph. It exists only so
+  //     iOS sees a real media element playing — that's what makes lock-screen play/pause reliable and
+  //     stops the now-playing slot from jumping to another app.
+  // Both run continuously while the session is going; the gain node alone decides what you actually hear.
+  var audioCtx = null, noiseSrc = null, filterNode = null, gainNode = null, anchorEl = null, pausePending = null;
 
-  // Build an 8s white-noise WAV in memory and hand back a blob URL (no external file needed).
+  // Build a few seconds of white-noise WAV in memory and hand back a blob URL (no external file needed).
   function makeNoiseURL() {
-    var sr = 44100, seconds = 8, n = sr * seconds, bytes = 44 + n * 2;
+    var sr = 44100, seconds = 4, n = sr * seconds, bytes = 44 + n * 2;
     var ab = new ArrayBuffer(bytes), dv = new DataView(ab);
     function ws(o, s) { for (var i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); }
     ws(0, "RIFF"); dv.setUint32(4, bytes - 8, true); ws(8, "WAVE"); ws(12, "fmt ");
@@ -352,21 +354,41 @@
     // iOS: play through the media/playback channel so the silent (mute) switch doesn't kill the noise.
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
 
-    noiseEl = new Audio();
-    noiseEl.src = makeNoiseURL();
-    noiseEl.loop = true;
-    noiseEl.preload = "auto";
+    // (1) Gapless audible noise: a long random buffer looped sample-accurately.
+    var bufLen = audioCtx.sampleRate * 10;
+    var buffer = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+    var data = buffer.getChannelData(0);
+    for (var i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+    noiseSrc = audioCtx.createBufferSource();
+    noiseSrc.buffer = buffer;
+    noiseSrc.loop = true;
 
-    mediaSrc = audioCtx.createMediaElementSource(noiseEl);
     filterNode = audioCtx.createBiquadFilter();
     filterNode.type = "lowpass";
     filterNode.frequency.value = settings.tone;
     filterNode.Q.value = 0.7;
     gainNode = audioCtx.createGain();
     gainNode.gain.value = 0;
-    mediaSrc.connect(filterNode);
+    noiseSrc.connect(filterNode);
     filterNode.connect(gainNode);
     gainNode.connect(audioCtx.destination);
+    noiseSrc.start(0);
+
+    // (2) Silenced media-element anchor for reliable iOS lock-screen control.
+    anchorEl = new Audio();
+    anchorEl.src = makeNoiseURL();
+    anchorEl.loop = true;
+    anchorEl.preload = "auto";
+    var anchorSrc = audioCtx.createMediaElementSource(anchorEl);
+    var anchorGain = audioCtx.createGain();
+    anchorGain.gain.value = 0;             // element claims the session but is inaudible
+    anchorSrc.connect(anchorGain);
+    anchorGain.connect(audioCtx.destination);
+
+    // If the context wakes back up (after an interruption/route change), re-apply the right volume.
+    audioCtx.onstatechange = function () {
+      if (audioCtx.state === "running" && wantNoise()) rampGain(targetGain());
+    };
   }
 
   // Audible right now? (focus block with sound on, or previewing.)
@@ -387,23 +409,23 @@
     gainNode.gain.linearRampToValueAtTime(to, now + 0.4);
   }
 
-  // The single source of truth for audio. Keeps the element playing across the whole running session
-  // (so the media session stays alive), and only the gain decides whether you actually hear it.
+  // The single source of truth for audio. Keeps the anchor element playing across the whole running
+  // session (so the media session stays alive), and only the gain decides whether you actually hear it.
   function syncAudioToState() {
-    var shouldPlay = previewing || (running && settings.soundOn);  // element playing (maybe silent)
+    var shouldPlay = previewing || (running && settings.soundOn);  // anchor playing (noise maybe silent)
     if (shouldPlay) {
       if (pausePending) { clearTimeout(pausePending); pausePending = null; }
       ensureAudio();
       if (audioCtx.state !== "running") audioCtx.resume().catch(function () {});
       filterNode.frequency.value = settings.tone;
-      var p = noiseEl.play();
+      var p = anchorEl.play();
       if (p && p.catch) p.catch(function () {});
       rampGain(wantNoise() ? targetGain() : 0);
     } else {
       if (gainNode) rampGain(0);
-      if (noiseEl) {                 // fade out, then release the media element
+      if (anchorEl) {                // fade out, then release the media element
         if (pausePending) clearTimeout(pausePending);
-        pausePending = setTimeout(function () { try { noiseEl.pause(); } catch (e) {} pausePending = null; }, 450);
+        pausePending = setTimeout(function () { try { anchorEl.pause(); } catch (e) {} pausePending = null; }, 450);
       }
     }
   }
@@ -429,11 +451,27 @@
     document.body.className = phase;
     phaseLabel.textContent = phase === "work" ? "Focus" : "Rest";
     sessionCount.textContent = "Session " + sessionNum;
-    document.title = fmt(remaining) + " · " + (phase === "work" ? "Focus" : "Rest");
+    if (!flashTimer) document.title = fmt(remaining) + " · " + (phase === "work" ? "Focus" : "Rest");
     playIcon.innerHTML = running
       ? '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>'   // pause
       : '<path d="M8 5v14l11-7z"/>';               // play
     syncMedia();
+  }
+
+  // ---------- Desktop tab flash ----------
+  // When a phase ends while you're on another tab, blink the tab title until you come back.
+  var flashTimer = null, flashState = false;
+  function startTitleFlash(msg) {
+    if (document.visibilityState === "visible") return;   // you're already looking at it
+    stopTitleFlash();
+    flashTimer = setInterval(function () {
+      flashState = !flashState;
+      document.title = flashState ? "✨ " + msg : "    ";
+    }, 850);
+  }
+  function stopTitleFlash() {
+    if (flashTimer) { clearInterval(flashTimer); flashTimer = null; }
+    flashState = false;
   }
 
   // ---------- Lock-screen / Media Session ----------
@@ -495,6 +533,7 @@
         chime(phase);                 // ding for the phase we landed in
         syncAudioToState();
         setHint(phase === "work" ? "Back to focus" : "Time to rest");
+        startTitleFlash(phase === "work" ? "Focus time!" : "Rest time!");
       }
     }
     if (running) remaining = Math.max(0, (endTime - now) / 1000);
@@ -621,6 +660,7 @@
   // When we come back to the app (after a call, app switch, or screen unlock), catch the timer up
   // and restart the noise — iOS suspends the audio context and JS timers in the background.
   function onReturn() {
+    stopTitleFlash();
     if (running) { tick(); requestWake(); }
     syncAudioToState();
   }
@@ -629,6 +669,15 @@
   });
   window.addEventListener("focus", onReturn);
   window.addEventListener("pageshow", onReturn);
+
+  // Audio-output route changed (e.g. an AirPod taken out and put back in). Removing it pauses the
+  // media element; when it reconnects, re-assert playback so the noise comes back on its own.
+  // (We resume on reconnect rather than on removal so we never blast the phone speaker.)
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener("devicechange", function () {
+      if (running || previewing) syncAudioToState();
+    });
+  }
 
   // ---------- Preview ----------
   function startPreview() {
