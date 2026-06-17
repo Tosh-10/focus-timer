@@ -325,37 +325,44 @@
   ringFg.style.strokeDasharray = CIRC;
 
   // ---------- Audio ----------
-  // The audible white noise IS a looping <audio> element (routed through a Web Audio lowpass for the
-  // tone control). It must be a real media element, not a Web Audio buffer source, because iOS only
-  // keeps audio playing while the screen is LOCKED for actual media elements — and that's also what
-  // makes the lock-screen play/pause reliable. The element plays for the whole running session; the
-  // gain node decides whether you actually hear it (silent during rest).
-  // The clip is built as a seamless (crossfaded) loop so loop=true has no click/gap at the seam.
-  var audioCtx = null, filterNode = null, gainNode = null, noiseEl = null, pausePending = null;
+  // iOS reality check that shapes this design:
+  //   * A looping <audio> element has a real silence GAP at the loop seam on iPhone (can't be smoothed
+  //     away), but it's the ONLY thing that keeps playing while the screen is LOCKED.
+  //   * A Web Audio buffer source loops perfectly gaplessly, but iOS won't render synthesized Web Audio
+  //     while the screen is locked.
+  // So we run BOTH and switch on visibility:
+  //   foreground (screen on, the normal case with wake-lock) -> gapless buffer source
+  //   locked/hidden -> media element (renders while locked; long clip so its rare gap is infrequent)
+  // Both feed a shared lowpass (tone) -> master gain (volume / rest-mute) -> output.
+  var audioCtx = null, filterNode = null, masterGain = null, pausePending = null;
+  var bufferSrc = null, bufGain = null, noiseEl = null, elGain = null;
 
-  // Build ~30s of white-noise WAV whose end crossfades into its start, so it loops with no seam.
-  // The crossfade is EQUAL-POWER (sqrt weights): white noise is uncorrelated, so a linear blend would
-  // drop ~3dB at the seam and you'd hear a periodic dip — sqrt weights keep the loudness constant.
+  // Fill a Float32Array of length L with white noise that loops seamlessly, by equal-power crossfading
+  // the head with a wrapped tail (sqrt weights keep loudness constant for uncorrelated noise).
+  function seamlessNoise(L, cf) {
+    var raw = new Float32Array(L + cf);
+    for (var i = 0; i < raw.length; i++) raw[i] = Math.random() * 2 - 1;
+    var out = new Float32Array(L);
+    for (var i = 0; i < L; i++) {
+      if (i < cf) { var t = i / cf; out[i] = raw[i] * Math.sqrt(t) + raw[i + L] * Math.sqrt(1 - t); }
+      else out[i] = raw[i];
+    }
+    return out;
+  }
+
+  // A long seamless-loop WAV (blob URL) for the locked-screen media element.
   function makeNoiseURL() {
-    var sr = 44100, seconds = 30, N = sr * seconds, cf = Math.floor(sr * 0.5), L = N - cf;
-    var raw = new Float32Array(N);
-    for (var i = 0; i < N; i++) raw[i] = Math.random() * 2 - 1;
+    var sr = 44100, L = sr * 60, cf = Math.floor(sr * 0.5);  // 60s clip, 0.5s crossfade
+    var s = seamlessNoise(L, cf);
     var bytes = 44 + L * 2, ab = new ArrayBuffer(bytes), dv = new DataView(ab);
-    function ws(o, s) { for (var k = 0; k < s.length; k++) dv.setUint8(o + k, s.charCodeAt(k)); }
+    function ws(o, str) { for (var k = 0; k < str.length; k++) dv.setUint8(o + k, str.charCodeAt(k)); }
     ws(0, "RIFF"); dv.setUint32(4, bytes - 8, true); ws(8, "WAVE"); ws(12, "fmt ");
     dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
     dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
     ws(36, "data"); dv.setUint32(40, L * 2, true);
     for (var i = 0, off = 44; i < L; i++, off += 2) {
-      var s;
-      if (i < cf) {                         // blend head with the wrapped tail (raw[i+L]), equal-power
-        var t = i / cf;
-        s = raw[i] * Math.sqrt(t) + raw[i + L] * Math.sqrt(1 - t);
-      } else {
-        s = raw[i];
-      }
-      if (s > 1) s = 1; else if (s < -1) s = -1;
-      dv.setInt16(off, s * 0.9 * 32767, true);
+      var v = s[i]; if (v > 1) v = 1; else if (v < -1) v = -1;
+      dv.setInt16(off, v * 0.9 * 32767, true);
     }
     return URL.createObjectURL(new Blob([ab], { type: "audio/wav" }));
   }
@@ -367,26 +374,54 @@
     // iOS: play through the media/playback channel so the silent (mute) switch doesn't kill the noise.
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
 
-    noiseEl = new Audio();
-    noiseEl.src = makeNoiseURL();
-    noiseEl.loop = true;
-    noiseEl.preload = "auto";
-
-    var src = audioCtx.createMediaElementSource(noiseEl);
     filterNode = audioCtx.createBiquadFilter();
     filterNode.type = "lowpass";
     filterNode.frequency.value = settings.tone;
     filterNode.Q.value = 0.7;
-    gainNode = audioCtx.createGain();
-    gainNode.gain.value = 0;
-    src.connect(filterNode);
-    filterNode.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+    filterNode.connect(masterGain);
+    masterGain.connect(audioCtx.destination);
 
-    // If the context wakes back up (after an interruption/route change), re-apply the right volume.
+    // (a) gapless buffer source — audible in the foreground
+    var buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 10, audioCtx.sampleRate);
+    buf.getChannelData(0).set(seamlessNoise(audioCtx.sampleRate * 10, Math.floor(audioCtx.sampleRate * 0.25)));
+    bufferSrc = audioCtx.createBufferSource();
+    bufferSrc.buffer = buf;
+    bufferSrc.loop = true;
+    bufGain = audioCtx.createGain();
+    bufGain.gain.value = (document.visibilityState === "hidden") ? 0 : 1;
+    bufferSrc.connect(bufGain); bufGain.connect(filterNode);
+    bufferSrc.start(0);
+
+    // (b) media element — audible while locked (and the lock-screen anchor)
+    noiseEl = new Audio();
+    noiseEl.src = makeNoiseURL();
+    noiseEl.loop = true;
+    noiseEl.preload = "auto";
+    var elSrc = audioCtx.createMediaElementSource(noiseEl);
+    elGain = audioCtx.createGain();
+    elGain.gain.value = (document.visibilityState === "hidden") ? 1 : 0;
+    elSrc.connect(elGain); elGain.connect(filterNode);
+
     audioCtx.onstatechange = function () {
       if (audioCtx.state === "running" && wantNoise()) rampGain(targetGain());
     };
+  }
+
+  // Pick the audible source for the current visibility (gapless buffer in foreground, element when locked).
+  function selectSource() {
+    if (!audioCtx) return;
+    var hidden = document.visibilityState === "hidden";
+    setGain(bufGain, hidden ? 0 : 1);
+    setGain(elGain, hidden ? 1 : 0);
+  }
+  function setGain(node, to) {
+    if (!node || !audioCtx) return;
+    var now = audioCtx.currentTime;
+    node.gain.cancelScheduledValues(now);
+    node.gain.setValueAtTime(node.gain.value, now);
+    node.gain.linearRampToValueAtTime(to, now + 0.3);
   }
 
   // Audible right now? (focus block with sound on, or previewing.)
@@ -400,17 +435,17 @@
   }
 
   function rampGain(to) {
-    if (!gainNode || !audioCtx) return;
+    if (!masterGain || !audioCtx) return;
     var now = audioCtx.currentTime;
-    gainNode.gain.cancelScheduledValues(now);
-    gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-    gainNode.gain.linearRampToValueAtTime(to, now + 0.4);
+    masterGain.gain.cancelScheduledValues(now);
+    masterGain.gain.setValueAtTime(masterGain.gain.value, now);
+    masterGain.gain.linearRampToValueAtTime(to, now + 0.4);
   }
 
-  // The single source of truth for audio. Keeps the element playing across the whole running session
-  // (so it survives focus->rest->focus and the media session stays alive); the gain decides audibility.
+  // The single source of truth for audio. Both sources run for the whole session; the master gain
+  // decides audibility (silent during rest), and selectSource() decides which source you hear.
   function syncAudioToState() {
-    var shouldPlay = previewing || (running && settings.soundOn);  // element playing (maybe silent)
+    var shouldPlay = previewing || (running && settings.soundOn);
     if (shouldPlay) {
       if (pausePending) { clearTimeout(pausePending); pausePending = null; }
       ensureAudio();
@@ -418,9 +453,10 @@
       filterNode.frequency.value = settings.tone;
       var p = noiseEl.play();
       if (p && p.catch) p.catch(function () {});
+      selectSource();
       rampGain(wantNoise() ? targetGain() : 0);
     } else {
-      if (gainNode) rampGain(0);
+      if (masterGain) rampGain(0);
       if (noiseEl) {                 // fade out, then pause the media element
         if (pausePending) clearTimeout(pausePending);
         pausePending = setTimeout(function () { try { noiseEl.pause(); } catch (e) {} pausePending = null; }, 450);
@@ -664,6 +700,7 @@
   }
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "visible") onReturn();
+    else selectSource();   // going to lock/background: switch to the media element before JS suspends
   });
   window.addEventListener("focus", onReturn);
   window.addEventListener("pageshow", onReturn);
