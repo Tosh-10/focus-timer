@@ -325,25 +325,31 @@
   ringFg.style.strokeDasharray = CIRC;
 
   // ---------- Audio ----------
-  // Two cooperating pieces:
-  //  1. A looping Web Audio buffer source = the *audible* white noise. Its loop is sample-accurate,
-  //     so there's no gap/click every few seconds (an <audio loop> element is not gapless).
-  //  2. A looping <audio> element ("anchor") whose output we silence in the graph. It exists only so
-  //     iOS sees a real media element playing — that's what makes lock-screen play/pause reliable and
-  //     stops the now-playing slot from jumping to another app.
-  // Both run continuously while the session is going; the gain node alone decides what you actually hear.
-  var audioCtx = null, noiseSrc = null, filterNode = null, gainNode = null, anchorEl = null, pausePending = null;
+  // The audible white noise IS a looping <audio> element (routed through a Web Audio lowpass for the
+  // tone control). It must be a real media element, not a Web Audio buffer source, because iOS only
+  // keeps audio playing while the screen is LOCKED for actual media elements — and that's also what
+  // makes the lock-screen play/pause reliable. The element plays for the whole running session; the
+  // gain node decides whether you actually hear it (silent during rest).
+  // The clip is built as a seamless (crossfaded) loop so loop=true has no click/gap at the seam.
+  var audioCtx = null, filterNode = null, gainNode = null, noiseEl = null, pausePending = null;
 
-  // Build a few seconds of white-noise WAV in memory and hand back a blob URL (no external file needed).
+  // Build ~20s of white-noise WAV whose end crossfades into its start, so it loops with no seam.
   function makeNoiseURL() {
-    var sr = 44100, seconds = 4, n = sr * seconds, bytes = 44 + n * 2;
-    var ab = new ArrayBuffer(bytes), dv = new DataView(ab);
-    function ws(o, s) { for (var i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); }
+    var sr = 44100, seconds = 20, N = sr * seconds, cf = Math.floor(sr * 0.5), L = N - cf;
+    var raw = new Float32Array(N);
+    for (var i = 0; i < N; i++) raw[i] = Math.random() * 2 - 1;
+    var bytes = 44 + L * 2, ab = new ArrayBuffer(bytes), dv = new DataView(ab);
+    function ws(o, s) { for (var k = 0; k < s.length; k++) dv.setUint8(o + k, s.charCodeAt(k)); }
     ws(0, "RIFF"); dv.setUint32(4, bytes - 8, true); ws(8, "WAVE"); ws(12, "fmt ");
     dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
     dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
-    ws(36, "data"); dv.setUint32(40, n * 2, true);
-    for (var i = 0, off = 44; i < n; i++, off += 2) dv.setInt16(off, (Math.random() * 2 - 1) * 0.9 * 32767, true);
+    ws(36, "data"); dv.setUint32(40, L * 2, true);
+    for (var i = 0, off = 44; i < L; i++, off += 2) {
+      // first cf samples blend the head with the wrapped tail (raw[i+L]) so the loop is continuous
+      var s = i < cf ? raw[i] * (i / cf) + raw[i + L] * (1 - i / cf) : raw[i];
+      if (s > 1) s = 1; else if (s < -1) s = -1;
+      dv.setInt16(off, s * 0.9 * 32767, true);
+    }
     return URL.createObjectURL(new Blob([ab], { type: "audio/wav" }));
   }
 
@@ -354,36 +360,21 @@
     // iOS: play through the media/playback channel so the silent (mute) switch doesn't kill the noise.
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
 
-    // (1) Gapless audible noise: a long random buffer looped sample-accurately.
-    var bufLen = audioCtx.sampleRate * 10;
-    var buffer = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
-    var data = buffer.getChannelData(0);
-    for (var i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
-    noiseSrc = audioCtx.createBufferSource();
-    noiseSrc.buffer = buffer;
-    noiseSrc.loop = true;
+    noiseEl = new Audio();
+    noiseEl.src = makeNoiseURL();
+    noiseEl.loop = true;
+    noiseEl.preload = "auto";
 
+    var src = audioCtx.createMediaElementSource(noiseEl);
     filterNode = audioCtx.createBiquadFilter();
     filterNode.type = "lowpass";
     filterNode.frequency.value = settings.tone;
     filterNode.Q.value = 0.7;
     gainNode = audioCtx.createGain();
     gainNode.gain.value = 0;
-    noiseSrc.connect(filterNode);
+    src.connect(filterNode);
     filterNode.connect(gainNode);
     gainNode.connect(audioCtx.destination);
-    noiseSrc.start(0);
-
-    // (2) Silenced media-element anchor for reliable iOS lock-screen control.
-    anchorEl = new Audio();
-    anchorEl.src = makeNoiseURL();
-    anchorEl.loop = true;
-    anchorEl.preload = "auto";
-    var anchorSrc = audioCtx.createMediaElementSource(anchorEl);
-    var anchorGain = audioCtx.createGain();
-    anchorGain.gain.value = 0;             // element claims the session but is inaudible
-    anchorSrc.connect(anchorGain);
-    anchorGain.connect(audioCtx.destination);
 
     // If the context wakes back up (after an interruption/route change), re-apply the right volume.
     audioCtx.onstatechange = function () {
@@ -409,23 +400,23 @@
     gainNode.gain.linearRampToValueAtTime(to, now + 0.4);
   }
 
-  // The single source of truth for audio. Keeps the anchor element playing across the whole running
-  // session (so the media session stays alive), and only the gain decides whether you actually hear it.
+  // The single source of truth for audio. Keeps the element playing across the whole running session
+  // (so it survives focus->rest->focus and the media session stays alive); the gain decides audibility.
   function syncAudioToState() {
-    var shouldPlay = previewing || (running && settings.soundOn);  // anchor playing (noise maybe silent)
+    var shouldPlay = previewing || (running && settings.soundOn);  // element playing (maybe silent)
     if (shouldPlay) {
       if (pausePending) { clearTimeout(pausePending); pausePending = null; }
       ensureAudio();
       if (audioCtx.state !== "running") audioCtx.resume().catch(function () {});
       filterNode.frequency.value = settings.tone;
-      var p = anchorEl.play();
+      var p = noiseEl.play();
       if (p && p.catch) p.catch(function () {});
       rampGain(wantNoise() ? targetGain() : 0);
     } else {
       if (gainNode) rampGain(0);
-      if (anchorEl) {                // fade out, then release the media element
+      if (noiseEl) {                 // fade out, then pause the media element
         if (pausePending) clearTimeout(pausePending);
-        pausePending = setTimeout(function () { try { anchorEl.pause(); } catch (e) {} pausePending = null; }, 450);
+        pausePending = setTimeout(function () { try { noiseEl.pause(); } catch (e) {} pausePending = null; }, 450);
       }
     }
   }
