@@ -1,5 +1,5 @@
 // Bump CACHE_VERSION whenever you change index.html or assets, so phones pull the update.
-const CACHE_VERSION = "focus-timer-v10";
+const CACHE_VERSION = "focus-timer-v11";
 const ASSETS = [
   ".",
   "index.html",

@@ -290,7 +290,7 @@
     </div>
   </details>
 
-  <footer>Add to Home Screen for a full-screen app · settings save automatically</footer>
+  <footer>Add to Home Screen for a full-screen app · settings save automatically · <span id="ver">v11</span></footer>
 </main>
 
 <script>
@@ -851,7 +851,15 @@ if ("serviceWorker" in navigator) {
       refreshing = true;
       window.location.reload();
     });
-    navigator.serviceWorker.register("service-worker.js").catch(function () {});
+    // updateViaCache:"none" forces the SW script to be fetched fresh (not from the HTTP cache),
+    // so new versions are actually noticed instead of being masked by GitHub Pages' caching.
+    navigator.serviceWorker.register("service-worker.js", { updateViaCache: "none" }).then(function (reg) {
+      reg.update();
+      // Re-check for a new version every time the app is brought back to the foreground.
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") reg.update();
+      });
+    }).catch(function () {});
   });
 }
 </script>
