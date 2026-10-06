@@ -179,6 +179,9 @@
   }
   .chip.active { background: rgba(56,189,248,0.15); border-color: var(--accent); color: var(--accent); }
 
+  #noiseControls { display: flex; flex-direction: column; gap: 20px; }
+  .c25k-note { font-size: 12px; color: var(--muted); line-height: 1.45; background: var(--track); padding: 10px 12px; border-radius: 10px; }
+
   .sound-toggle { display: flex; align-items: center; gap: 10px; }
   .switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
@@ -335,37 +338,43 @@
         <label for="soundOn">White noise during focus</label>
       </div>
 
-      <div class="field">
-        <div class="field-row">
-          <label for="volume">Volume</label>
-          <span class="val" id="volumeVal">50%</span>
-        </div>
-        <input type="range" id="volume" min="0" max="100" value="50">
+      <div id="c25kAudioNote" class="c25k-note" hidden>
+        Interval dings mix over your music (keep the ringer on). No white noise while running.
       </div>
 
-      <div class="field">
-        <div class="field-row">
-          <label for="tone">Tone (deep ↔ bright)</label>
-          <span class="val" id="toneVal">2000 Hz</span>
+      <div id="noiseControls">
+        <div class="field">
+          <div class="field-row">
+            <label for="volume">Volume</label>
+            <span class="val" id="volumeVal">50%</span>
+          </div>
+          <input type="range" id="volume" min="0" max="100" value="50">
         </div>
-        <input type="range" id="tone" min="100" max="12000" value="2000" step="100">
-        <span style="font-size:11px;color:var(--muted)">Low = soft rumble · High = bright hiss</span>
-        <div class="presets" id="presets">
-          <button class="chip" data-tone="180">Brown · deep focus</button>
-          <button class="chip" data-tone="600">Rain · calm</button>
-          <button class="chip" data-tone="1200">Pink · balanced</button>
-          <button class="chip" data-tone="4000">White · alert</button>
-          <button class="chip" data-tone="9000">Bright · masking</button>
-        </div>
-      </div>
 
-      <button class="btn-round" id="previewBtn" style="border-radius:12px;height:44px;background:var(--track);font-weight:600;font-size:14px">
-        Preview noise
-      </button>
+        <div class="field">
+          <div class="field-row">
+            <label for="tone">Tone (deep ↔ bright)</label>
+            <span class="val" id="toneVal">2000 Hz</span>
+          </div>
+          <input type="range" id="tone" min="100" max="12000" value="2000" step="100">
+          <span style="font-size:11px;color:var(--muted)">Low = soft rumble · High = bright hiss</span>
+          <div class="presets" id="presets">
+            <button class="chip" data-tone="180">Brown · deep focus</button>
+            <button class="chip" data-tone="600">Rain · calm</button>
+            <button class="chip" data-tone="1200">Pink · balanced</button>
+            <button class="chip" data-tone="4000">White · alert</button>
+            <button class="chip" data-tone="9000">Bright · masking</button>
+          </div>
+        </div>
+
+        <button class="btn-round" id="previewBtn" style="border-radius:12px;height:44px;background:var(--track);font-weight:600;font-size:14px">
+          Preview noise
+        </button>
+      </div>
     </div>
   </details>
 
-  <footer>Add to Home Screen for a full-screen app · settings save automatically · <span id="ver">v13</span></footer>
+  <footer>Add to Home Screen for a full-screen app · settings save automatically · <span id="ver">v14</span></footer>
 </main>
 
 <script>
@@ -548,12 +557,19 @@
     return URL.createObjectURL(new Blob([ab], { type: "audio/wav" }));
   }
 
+  // iOS audio session: "playback" (pomodoro) owns the audio and ignores the mute switch so white noise
+  // always plays; "ambient" (Couch to 5K) MIXES with other audio so your music keeps playing and the
+  // interval dings layer on top — but, per iOS, ambient audio follows the mute/silent switch.
+  function applyAudioSession() {
+    try { if (navigator.audioSession) navigator.audioSession.type = isC25K() ? "ambient" : "playback"; }
+    catch (e) {}
+  }
+
   function ensureAudio() {
     if (audioCtx) return;
     var AC = window.AudioContext || window.webkitAudioContext;
     audioCtx = new AC();
-    // iOS: play through the media/playback channel so the silent (mute) switch doesn't kill the noise.
-    try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
+    applyAudioSession();
 
     filterNode = audioCtx.createBiquadFilter();
     filterNode.type = "lowpass";
@@ -605,9 +621,10 @@
     node.gain.linearRampToValueAtTime(to, now + 0.3);
   }
 
-  // Audible right now? (focus/run block with sound on, or previewing.)
+  // Audible white noise right now? C25K never plays continuous noise (dings only, mixed over music);
+  // it still keeps the element playing silently to hold the audio session open for those dings.
   function wantNoise() {
-    return previewing || (running && isIntense() && settings.soundOn);
+    return previewing || (running && isIntense() && settings.soundOn && !isC25K());
   }
 
   function targetGain() {
@@ -630,6 +647,7 @@
     if (shouldPlay) {
       if (pausePending) { clearTimeout(pausePending); pausePending = null; }
       ensureAudio();
+      applyAudioSession();   // pick mix-vs-exclusive for the current mode each time we (re)start
       if (audioCtx.state !== "running") audioCtx.resume().catch(function () {});
       filterNode.frequency.value = settings.tone;
       var p = noiseEl.play();
@@ -1009,11 +1027,14 @@
     var c = isC25K();
     $("c25kSelect").hidden = !c;
     $("durationsField").hidden = c;
+    $("noiseControls").hidden = c;        // volume/tone/preview only matter for white noise
+    $("c25kAudioNote").hidden = !c;
     document.querySelectorAll("#modeToggle button").forEach(function (b) {
       b.classList.toggle("active", b.dataset.mode === settings.mode);
     });
     document.querySelector('label[for="soundOn"]').textContent =
-      c ? "White noise while running" : "White noise during focus";
+      c ? "Interval ding sounds" : "White noise during focus";
+    applyAudioSession();
   }
 
   function save() {
