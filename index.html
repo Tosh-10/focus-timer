@@ -194,10 +194,54 @@
   .switch input:checked + .slider-sw::before { transform: translateX(20px); }
 
   footer { font-size: 11px; color: var(--muted); text-align: center; padding-bottom: 8px; }
+
+  /* Mode toggle (segmented control, top center) */
+  .mode-toggle {
+    display: inline-flex; gap: 4px; padding: 4px;
+    background: var(--bg-2); border: 1px solid var(--track); border-radius: 999px;
+  }
+  .mode-toggle button {
+    background: transparent; color: var(--muted);
+    border-radius: 999px; padding: 8px 16px;
+    font-size: 13px; font-weight: 600;
+  }
+  .mode-toggle button.active { background: var(--accent); color: #04212e; }
+
+  /* Week / Day selector for Couch to 5K */
+  .c25k-select { display: flex; gap: 18px; align-items: flex-end; }
+  .c25k-select .num-field { gap: 6px; }
+  .c25k-select label { font-size: 12px; color: var(--muted); font-weight: 600; text-align: center; }
+  .c25k-select .stepper { gap: 8px; }
+  .c25k-select .stepper button { width: 34px; height: 34px; font-size: 20px; border-radius: 9px; }
+  .c25k-select .num { min-width: 28px; }
 </style>
 </head>
 <body class="work">
 <main>
+  <div class="mode-toggle" id="modeToggle">
+    <button data-mode="pomodoro" class="active">Pomodoro</button>
+    <button data-mode="c25k">Couch to 5K</button>
+  </div>
+
+  <div class="c25k-select" id="c25kSelect" hidden>
+    <div class="num-field">
+      <label>Week</label>
+      <div class="stepper">
+        <button data-c25k="week" data-act="dec">−</button>
+        <span class="num" id="weekNum">1</span>
+        <button data-c25k="week" data-act="inc">+</button>
+      </div>
+    </div>
+    <div class="num-field">
+      <label>Day</label>
+      <div class="stepper">
+        <button data-c25k="day" data-act="dec">−</button>
+        <span class="num" id="dayNum">1</span>
+        <button data-c25k="day" data-act="inc">+</button>
+      </div>
+    </div>
+  </div>
+
   <div class="phase-label" id="phaseLabel">Focus</div>
 
   <div class="ring-wrap">
@@ -233,7 +277,7 @@
       <span class="chev">▾</span>
     </summary>
     <div class="settings-body">
-      <div class="durations">
+      <div class="durations" id="durationsField">
         <div class="num-field">
           <label>Focus (min)</label>
           <div class="stepper">
@@ -290,7 +334,7 @@
     </div>
   </details>
 
-  <footer>Add to Home Screen for a full-screen app · settings save automatically · <span id="ver">v11</span></footer>
+  <footer>Add to Home Screen for a full-screen app · settings save automatically · <span id="ver">v12</span></footer>
 </main>
 
 <script>
@@ -298,17 +342,23 @@
   "use strict";
 
   // ---------- State ----------
-  var defaults = { work: 25, rest: 5, volume: 50, tone: 2000, soundOn: true };
+  var defaults = { work: 25, rest: 5, volume: 50, tone: 2000, soundOn: true,
+                   mode: "pomodoro", c25kWeek: 1, c25kDay: 1 };
   var settings = load();
 
-  var phase = "work";          // "work" | "rest"
+  var phase = "work";          // pomodoro phase: "work" | "rest"
   var running = false;
   var remaining = settings.work * 60; // seconds
   var sessionNum = 1;
   var tickHandle = null;
-  var endTime = 0;             // absolute timestamp the phase ends
+  var endTime = 0;             // absolute timestamp the phase/segment ends
   var wakeLock = null;
   var previewing = false;
+
+  // Couch-to-5K state
+  var plan = [];               // array of {type, dur} segments for the current workout
+  var segIndex = 0;            // index of the current segment
+  var completed = false;       // true when a C25K workout has just finished
 
   // ---------- DOM ----------
   var $ = function (id) { return document.getElementById(id); };
@@ -323,6 +373,71 @@
   var R = 92;
   var CIRC = 2 * Math.PI * R;
   ringFg.style.strokeDasharray = CIRC;
+
+  // ---------- Couch to 5K program ----------
+  // The classic 9-week plan: 3 workouts per week (27 total). Weeks 1-4 and 7-9 are the same every day;
+  // weeks 5 and 6 differ by day. Each workout gets a 5-min warm-up walk and a 5-min cool-down walk.
+  // run = red/"work"-like (noise on); walk/warmup/cooldown = green/"rest"-like (quiet).
+  function c25kPlan(week, day) {
+    var main = [];                                   // [type, seconds] for the run/walk set
+    function run(s) { main.push(["run", s]); }
+    function walk(s) { main.push(["walk", s]); }
+    function rep(n, fn) { for (var i = 0; i < n; i++) fn(); }
+    switch (week) {
+      case 1: rep(8, function () { run(60); walk(90); }); break;
+      case 2: rep(6, function () { run(90); walk(120); }); break;
+      case 3: rep(2, function () { run(90); walk(90); run(180); walk(180); }); break;
+      case 4: run(180); walk(90); run(300); walk(150); run(180); walk(90); run(300); break;
+      case 5:
+        if (day === 1) { run(300); walk(180); run(300); walk(180); run(300); }
+        else if (day === 2) { run(480); walk(300); run(480); }
+        else { run(1200); }                          // 20 min continuous
+        break;
+      case 6:
+        if (day === 1) { run(300); walk(180); run(480); walk(180); run(300); }
+        else if (day === 2) { run(600); walk(180); run(600); }
+        else { run(1500); }                          // 25 min
+        break;
+      case 7: run(1500); break;                      // 25 min
+      case 8: run(1680); break;                      // 28 min
+      default: run(1800); break;                     // week 9: 30 min
+    }
+    var segs = [{ type: "warmup", dur: 300 }];
+    main.forEach(function (m) { segs.push({ type: m[0], dur: m[1] }); });
+    segs.push({ type: "cooldown", dur: 300 });
+    return segs;
+  }
+
+  function isC25K() { return settings.mode === "c25k"; }
+  function loadPlan() { plan = c25kPlan(settings.c25kWeek, settings.c25kDay); segIndex = 0; }
+  function resetWorkout() { loadPlan(); completed = false; remaining = totalForPhase(); }
+
+  // current segment/phase type
+  function curType() {
+    if (isC25K()) return plan[segIndex] ? plan[segIndex].type : "cooldown";
+    return phase;
+  }
+  // "intense" = run or focus -> red styling + white noise
+  function isIntense() { var t = curType(); return t === "run" || t === "work"; }
+
+  var LABELS = { work: "Focus", rest: "Rest", run: "Run", walk: "Walk", warmup: "Warm up", cooldown: "Cool down" };
+  function typeLabel(t) { return LABELS[t] || t; }
+
+  // how many run intervals and which one we're on (for the "Run 3/8" style readout)
+  function runProgress() {
+    var total = 0, idx = 0;
+    for (var i = 0; i < plan.length; i++) {
+      if (plan[i].type === "run") { total++; if (i <= segIndex) idx = total; }
+    }
+    return { idx: idx, total: total };
+  }
+
+  function nextHint() {
+    if (!isC25K()) return "";
+    var nx = plan[segIndex + 1];
+    if (!nx) return "Last one — finish strong!";
+    return "Next: " + typeLabel(nx.type) + " " + fmt(nx.dur);
+  }
 
   // ---------- Audio ----------
   // iOS reality check that shapes this design:
@@ -424,9 +539,9 @@
     node.gain.linearRampToValueAtTime(to, now + 0.3);
   }
 
-  // Audible right now? (focus block with sound on, or previewing.)
+  // Audible right now? (focus/run block with sound on, or previewing.)
   function wantNoise() {
-    return previewing || (running && phase === "work" && settings.soundOn);
+    return previewing || (running && isIntense() && settings.soundOn);
   }
 
   function targetGain() {
@@ -473,19 +588,39 @@
   }
 
   function totalForPhase() {
+    if (isC25K()) return plan[segIndex] ? plan[segIndex].dur : 0;
     return (phase === "work" ? settings.work : settings.rest) * 60;
   }
 
   function render() {
+    if (isC25K() && completed) {
+      ringFg.style.strokeDashoffset = 0;             // full ring
+      document.body.className = "rest";
+      phaseLabel.textContent = "Complete 🎉";
+      timeDisplay.textContent = "Done";
+      sessionCount.textContent = "Week " + settings.c25kWeek + " · Day " + settings.c25kDay;
+      if (!flashTimer) document.title = "Workout complete";
+      playIcon.innerHTML = '<path d="M8 5v14l11-7z"/>';
+      syncMedia();
+      return;
+    }
+
     timeDisplay.textContent = fmt(remaining);
     var total = totalForPhase();
     var frac = total > 0 ? remaining / total : 0;
     ringFg.style.strokeDashoffset = CIRC * (1 - frac);
 
-    document.body.className = phase;
-    phaseLabel.textContent = phase === "work" ? "Focus" : "Rest";
-    sessionCount.textContent = "Session " + sessionNum;
-    if (!flashTimer) document.title = fmt(remaining) + " · " + (phase === "work" ? "Focus" : "Rest");
+    document.body.className = isIntense() ? "work" : "rest";
+    phaseLabel.textContent = typeLabel(curType());
+    if (isC25K()) {
+      var rp = runProgress();
+      sessionCount.textContent = curType() === "run" && rp.total
+        ? "Run " + rp.idx + " / " + rp.total
+        : "Week " + settings.c25kWeek + " · Day " + settings.c25kDay;
+    } else {
+      sessionCount.textContent = "Session " + sessionNum;
+    }
+    if (!flashTimer) document.title = fmt(remaining) + " · " + typeLabel(curType());
     playIcon.innerHTML = running
       ? '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>'   // pause
       : '<path d="M8 5v14l11-7z"/>';               // play
@@ -515,14 +650,14 @@
   var lastMetaKey = "";
   function syncMedia() {
     if (!("mediaSession" in navigator)) return;
-    var key = phase + "|" + sessionNum;
+    var key = settings.mode + "|" + curType() + "|" + sessionNum + "|" + settings.c25kWeek + "|" + settings.c25kDay + "|" + completed;
     if (key !== lastMetaKey) {
       lastMetaKey = key;
       try {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: phase === "work" ? "Focus" : "Rest",
-          artist: "Session " + sessionNum,
-          album: "Focus Timer",
+          title: completed ? "Complete 🎉" : typeLabel(curType()),
+          artist: isC25K() ? ("Week " + settings.c25kWeek + " · Day " + settings.c25kDay) : ("Session " + sessionNum),
+          album: isC25K() ? "Couch to 5K" : "Focus Timer",
           artwork: [
             { src: "icon-192.png", sizes: "192x192", type: "image/png" },
             { src: "icon-512.png", sizes: "512x512", type: "image/png" }
@@ -557,32 +692,67 @@
   function tick() {
     var now = Date.now();
     if (running && now >= endTime) {
-      var transitioned = false;
-      var guard = 0;
+      var transitioned = false, finished = false, guard = 0;
       while (now >= endTime && guard++ < 10000) {
-        advanceOneBoundary();
+        if (!advanceOneBoundary()) { finished = true; break; }
         transitioned = true;
       }
+      if (finished) { completeWorkout(); return; }
       if (transitioned) {
-        chime(phase);                 // ding for the phase we landed in
+        chime(isIntense() ? "work" : "rest");       // ding for the phase/segment we landed in
         syncAudioToState();
-        setHint(phase === "work" ? "Back to focus" : "Time to rest");
-        startTitleFlash(phase === "work" ? "Focus time!" : "Rest time!");
+        if (isC25K()) {
+          setHint(nextHint());
+          startTitleFlash(typeLabel(curType()) + "!");
+        } else {
+          setHint(phase === "work" ? "Back to focus" : "Time to rest");
+          startTitleFlash(phase === "work" ? "Focus time!" : "Rest time!");
+        }
       }
     }
     if (running) remaining = Math.max(0, (endTime - now) / 1000);
     render();
   }
 
-  // Move past one completed phase: flip work<->rest and push endTime forward by the new phase's length.
+  // Move past one completed phase/segment, pushing endTime forward by the new one's length.
+  // Returns false when a C25K workout has no more segments (so tick() can finish it).
   function advanceOneBoundary() {
-    if (phase === "work") {
-      phase = "rest";
-    } else {
-      phase = "work";
-      sessionNum++;
+    if (isC25K()) {
+      if (segIndex + 1 >= plan.length) return false;
+      segIndex++;
+      endTime += totalForPhase() * 1000;
+      return true;
     }
+    if (phase === "work") phase = "rest";
+    else { phase = "work"; sessionNum++; }
     endTime += totalForPhase() * 1000;
+    return true;
+  }
+
+  function completeWorkout() {
+    running = false;
+    completed = true;
+    clearInterval(tickHandle);
+    remaining = 0;
+    syncAudioToState();              // running=false -> fades noise out
+    releaseWake();
+    // celebratory triple chime
+    try {
+      ensureAudio();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      [523.25, 659.25, 783.99].forEach(function (f, i) {
+        var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = "sine"; o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
+        var t = audioCtx.currentTime + i * 0.16;
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.35, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+        o.start(t); o.stop(t + 0.55);
+      });
+    } catch (e) {}
+    if (navigator.vibrate) navigator.vibrate([150, 80, 150, 80, 250]);
+    startTitleFlash("Workout done!");
+    setHint("Workout complete! 🎉  Great job — pick the next day when you're ready.");
+    render();
   }
 
   function startInterval() {
@@ -592,6 +762,7 @@
 
   function start() {
     if (running) return;
+    if (isC25K() && (completed || remaining <= 0)) resetWorkout();  // start a fresh workout
     running = true;
     endTime = Date.now() + remaining * 1000;
     startInterval();
@@ -627,6 +798,15 @@
   }
 
   function nextPhase(auto) {
+    if (isC25K()) {
+      if (completed) return;
+      if (segIndex + 1 >= plan.length) { completeWorkout(); return; }
+      segIndex++;
+      resetPhaseTiming();
+      setHint(nextHint());
+      render();
+      return;
+    }
     if (phase === "work") phase = "rest";
     else { phase = "work"; sessionNum++; }
     resetPhaseTiming();
@@ -636,11 +816,19 @@
 
   function restartStep() {
     resetPhaseTiming();
-    setHint("Step restarted");
+    setHint(isC25K() ? nextHint() : "Step restarted");
     render();
   }
 
   function prevPhase() {
+    if (isC25K()) {
+      if (segIndex > 0) segIndex--;
+      else { restartStep(); return; }
+      resetPhaseTiming();
+      setHint(nextHint());
+      render();
+      return;
+    }
     if (phase === "rest") {
       phase = "work";
     } else { // currently work
@@ -655,6 +843,7 @@
   // Spotify-style: tap within 5s of the step starting -> previous step; otherwise restart current step
   function backAction() {
     if (previewing) stopPreview();
+    if (isC25K() && completed) { resetWorkout(); render(); return; }
     var elapsed = totalForPhase() - remaining;
     if (elapsed <= 5) prevPhase();
     else restartStep();
@@ -728,17 +917,35 @@
 
   // ---------- Settings UI ----------
   function setHint(t) {
-    hint.textContent = t || (running ? "" : "Press play to begin · white noise plays during focus");
+    if (t) { hint.textContent = t; return; }
+    if (running) { hint.textContent = isC25K() ? nextHint() : ""; return; }
+    hint.textContent = isC25K()
+      ? "Week " + settings.c25kWeek + " · Day " + settings.c25kDay + " — press play to start"
+      : "Press play to begin · white noise plays during focus";
   }
 
   function syncSettingsUI() {
     $("workNum").textContent = settings.work;
     $("restNum").textContent = settings.rest;
+    $("weekNum").textContent = settings.c25kWeek;
+    $("dayNum").textContent = settings.c25kDay;
     $("volume").value = settings.volume;
     $("volumeVal").textContent = settings.volume + "%";
     $("tone").value = settings.tone;
     $("toneVal").textContent = settings.tone + " Hz";
     $("soundOn").checked = settings.soundOn;
+  }
+
+  // Show/hide the controls that belong to each mode and highlight the active toggle button.
+  function applyMode() {
+    var c = isC25K();
+    $("c25kSelect").hidden = !c;
+    $("durationsField").hidden = c;
+    document.querySelectorAll("#modeToggle button").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.mode === settings.mode);
+    });
+    document.querySelector('label[for="soundOn"]').textContent =
+      c ? "White noise while running" : "White noise during focus";
   }
 
   function save() {
@@ -753,7 +960,10 @@
           rest: clamp(s.rest, 1, 60, defaults.rest),
           volume: clamp(s.volume, 0, 100, defaults.volume),
           tone: clamp(s.tone, 100, 12000, defaults.tone),
-          soundOn: s.soundOn !== false
+          soundOn: s.soundOn !== false,
+          mode: s.mode === "c25k" ? "c25k" : "pomodoro",
+          c25kWeek: clamp(s.c25kWeek, 1, 9, defaults.c25kWeek),
+          c25kDay: clamp(s.c25kDay, 1, 3, defaults.c25kDay)
         };
       }
     } catch (e) {}
@@ -787,17 +997,49 @@
     });
   }
 
-  document.querySelectorAll(".stepper button").forEach(function (b) {
+  // Focus / Rest duration steppers (pomodoro)
+  document.querySelectorAll(".stepper button[data-target]").forEach(function (b) {
     b.addEventListener("click", function () {
       var target = b.dataset.target;
-      var act = b.dataset.act;
-      var step = act === "inc" ? 1 : -1;
+      var step = b.dataset.act === "inc" ? 1 : -1;
       settings[target] = clamp(settings[target] + step, 1, target === "work" ? 120 : 60, settings[target]);
-      // if the changed phase is the current one and timer isn't running, reset display
-      if (!running && phase === target) remaining = totalForPhase();
-      else if (!running) remaining = totalForPhase(); // keep display in sync when idle
+      if (!running) remaining = totalForPhase();  // keep display in sync when idle
       syncSettingsUI();
       save();
+      render();
+    });
+  });
+
+  // Week / Day steppers (Couch to 5K)
+  document.querySelectorAll(".stepper button[data-c25k]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var which = b.dataset.c25k;                 // "week" | "day"
+      var step = b.dataset.act === "inc" ? 1 : -1;
+      if (which === "week") settings.c25kWeek = clamp(settings.c25kWeek + step, 1, 9, settings.c25kWeek);
+      else settings.c25kDay = clamp(settings.c25kDay + step, 1, 3, settings.c25kDay);
+      if (running) pause();                        // changing the workout resets it
+      resetWorkout();
+      syncSettingsUI();
+      save();
+      setHint("");
+      render();
+    });
+  });
+
+  // Mode toggle (Pomodoro <-> Couch to 5K)
+  document.querySelectorAll("#modeToggle button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var m = b.dataset.mode;
+      if (m === settings.mode) return;
+      if (running) pause();
+      if (previewing) stopPreview();
+      settings.mode = m;
+      if (isC25K()) { resetWorkout(); }
+      else { phase = "work"; sessionNum = 1; completed = false; remaining = settings.work * 60; }
+      applyMode();
+      syncSettingsUI();
+      save();
+      setHint("");
       render();
     });
   });
@@ -833,8 +1075,10 @@
   });
 
   // ---------- Init ----------
+  loadPlan();                               // build the C25K plan for the saved week/day
   syncSettingsUI();
   markActivePreset();
+  applyMode();
   setupMediaHandlers();
   remaining = totalForPhase();
   render();
